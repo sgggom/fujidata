@@ -1,0 +1,1098 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>富士 EXIF 解析器 — Fujifilm Parameter Reader</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+JP:wght@200;400;700&family=DM+Mono:wght@300;400;500&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/exifr/dist/full.umd.js"></script>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#141414;--bg2:#1a1a1a;--bg3:#222;--bg4:#2a2a2a;
+  --fg:#e8e4df;--fg2:#a09a92;--fg3:#6b665f;
+  --red:#c8302a;--red2:#e8453e;--red-dim:rgba(200,48,42,.12);
+  --border:#2e2e2e;--border2:#3a3a3a;
+  --card:#1c1c1c;--card-hover:#232323;
+  --radius:6px;--radius-lg:10px;
+  --font-jp:'Noto Serif JP',serif;
+  --font-mono:'DM Mono',monospace;
+  --font-cn:'Noto Sans SC',sans-serif;
+}
+html{font-size:15px;scroll-behavior:smooth}
+body{
+  background:var(--bg);color:var(--fg);
+  font-family:var(--font-cn);font-weight:300;
+  line-height:1.6;min-height:100vh;
+  -webkit-font-smoothing:antialiased;
+}
+
+/* --- Grain overlay --- */
+body::before{
+  content:'';position:fixed;inset:0;z-index:9999;pointer-events:none;
+  opacity:.035;
+  background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* --- Header --- */
+.header{
+  padding:2.5rem 2rem 2rem;text-align:center;
+  border-bottom:1px solid var(--border);
+  position:relative;overflow:hidden;
+}
+.header::after{
+  content:'';position:absolute;bottom:0;left:50%;transform:translateX(-50%);
+  width:60px;height:2px;background:var(--red);
+}
+.header h1{
+  font-family:var(--font-jp);font-weight:200;
+  font-size:2rem;letter-spacing:.15em;color:var(--fg);
+  margin-bottom:.3rem;
+}
+.header h1 span{color:var(--red2);font-weight:400}
+.header .subtitle{
+  font-family:var(--font-mono);font-size:.7rem;
+  color:var(--fg3);letter-spacing:.3em;text-transform:uppercase;
+}
+
+/* --- Container --- */
+.container{max-width:1200px;margin:0 auto;padding:1.5rem}
+
+/* --- Drop Zone --- */
+.dropzone{
+  border:1.5px dashed var(--border2);
+  border-radius:var(--radius-lg);
+  padding:3.5rem 2rem;
+  text-align:center;cursor:pointer;
+  transition:all .3s ease;
+  position:relative;overflow:hidden;
+  background:var(--bg2);
+}
+.dropzone:hover,.dropzone.dragover{
+  border-color:var(--red);background:var(--red-dim);
+}
+.dropzone.dragover{transform:scale(1.005)}
+.dropzone-icon{
+  width:48px;height:48px;margin:0 auto 1rem;
+  stroke:var(--fg3);transition:stroke .3s;
+}
+.dropzone:hover .dropzone-icon{stroke:var(--red2)}
+.dropzone h2{
+  font-family:var(--font-jp);font-weight:400;
+  font-size:1.15rem;color:var(--fg);margin-bottom:.4rem;
+}
+.dropzone p{font-size:.8rem;color:var(--fg3)}
+.dropzone .formats{
+  margin-top:.8rem;display:flex;gap:.5rem;justify-content:center;flex-wrap:wrap;
+}
+.dropzone .formats span{
+  font-family:var(--font-mono);font-size:.65rem;
+  padding:.2rem .6rem;border-radius:3px;
+  background:var(--bg);color:var(--fg3);border:1px solid var(--border);
+}
+.dropzone input[type=file]{display:none}
+
+/* --- Toolbar --- */
+.toolbar{
+  display:flex;gap:.6rem;justify-content:flex-end;
+  padding:.8rem 0;flex-wrap:wrap;
+}
+.toolbar button{
+  font-family:var(--font-mono);font-size:.7rem;
+  padding:.45rem 1rem;border-radius:var(--radius);
+  border:1px solid var(--border2);background:var(--bg3);color:var(--fg2);
+  cursor:pointer;transition:all .2s;letter-spacing:.04em;
+}
+.toolbar button:hover{border-color:var(--red);color:var(--fg);background:var(--bg4)}
+.toolbar button.primary{
+  background:var(--red);border-color:var(--red);color:#fff;
+}
+.toolbar button.primary:hover{background:var(--red2)}
+
+/* --- File tabs --- */
+.file-tabs{
+  display:flex;gap:.3rem;padding:.5rem 0;overflow-x:auto;
+  scrollbar-width:thin;scrollbar-color:var(--border) transparent;
+}
+.file-tab{
+  font-family:var(--font-mono);font-size:.7rem;
+  padding:.4rem 1rem;border-radius:var(--radius) var(--radius) 0 0;
+  border:1px solid var(--border);border-bottom:none;
+  background:var(--bg2);color:var(--fg3);cursor:pointer;
+  white-space:nowrap;transition:all .2s;position:relative;
+}
+.file-tab:hover{color:var(--fg)}
+.file-tab.active{background:var(--card);color:var(--fg);border-color:var(--border2)}
+.file-tab.active::after{
+  content:'';position:absolute;bottom:-1px;left:0;right:0;
+  height:2px;background:var(--red);
+}
+.file-tab .close{
+  margin-left:.5rem;opacity:.4;cursor:pointer;font-size:.8rem;
+}
+.file-tab .close:hover{opacity:1;color:var(--red2)}
+
+/* --- Result panel --- */
+.result-panel{
+  display:none;
+  border:1px solid var(--border);border-top:none;
+  border-radius:0 0 var(--radius-lg) var(--radius-lg);
+  background:var(--card);overflow:hidden;
+}
+.result-panel.visible{display:block;animation:fadeIn .35s ease}
+@keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+
+.result-inner{display:grid;grid-template-columns:240px 1fr;min-height:400px}
+@media(max-width:768px){.result-inner{grid-template-columns:1fr}}
+
+/* --- Image sidebar --- */
+.image-sidebar{
+  padding:1.2rem;border-right:1px solid var(--border);
+  display:flex;flex-direction:column;align-items:center;gap:1rem;
+  background:var(--bg2);
+}
+.image-sidebar img{
+  width:100%;max-width:200px;border-radius:var(--radius);
+  border:1px solid var(--border);object-fit:cover;
+  aspect-ratio:3/2;background:var(--bg);
+}
+.image-sidebar .filename{
+  font-family:var(--font-mono);font-size:.7rem;
+  color:var(--fg2);word-break:break-all;text-align:center;
+}
+.image-sidebar .camera-badge{
+  font-family:var(--font-mono);font-size:.65rem;
+  padding:.3rem .7rem;border-radius:3px;
+  background:var(--red-dim);color:var(--red2);
+  border:1px solid rgba(200,48,42,.2);
+}
+.quick-specs{
+  width:100%;display:grid;grid-template-columns:1fr 1fr;gap:.3rem;
+}
+.quick-spec{
+  text-align:center;padding:.5rem .3rem;
+  background:var(--bg);border-radius:var(--radius);
+  border:1px solid var(--border);
+}
+.quick-spec .val{
+  font-family:var(--font-mono);font-size:.85rem;
+  color:var(--fg);font-weight:500;
+}
+.quick-spec .lbl{font-size:.6rem;color:var(--fg3);margin-top:.15rem}
+
+/* --- Data sections --- */
+.data-area{padding:1rem;overflow-y:auto;max-height:75vh}
+.data-section{margin-bottom:1.2rem}
+.data-section-header{
+  display:flex;align-items:center;gap:.6rem;
+  padding:.5rem 0;border-bottom:1px solid var(--border);
+  margin-bottom:.6rem;cursor:pointer;user-select:none;
+}
+.data-section-header .icon{
+  width:16px;height:16px;flex-shrink:0;stroke:var(--red2);
+}
+.data-section-header h3{
+  font-family:var(--font-jp);font-weight:400;font-size:.9rem;
+  color:var(--fg);flex:1;
+}
+.data-section-header .sub{
+  font-family:var(--font-mono);font-size:.6rem;color:var(--fg3);
+}
+.data-section-header .chevron{
+  width:14px;height:14px;stroke:var(--fg3);transition:transform .25s;
+}
+.data-section.collapsed .chevron{transform:rotate(-90deg)}
+.data-section.collapsed .data-grid{display:none}
+
+.data-grid{
+  display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));
+  gap:.4rem;
+}
+.data-item{
+  display:flex;justify-content:space-between;align-items:baseline;
+  padding:.45rem .7rem;border-radius:var(--radius);
+  background:var(--bg2);border:1px solid transparent;
+  transition:border-color .2s;
+}
+.data-item:hover{border-color:var(--border2)}
+.data-item .label{font-size:.75rem;color:var(--fg2)}
+.data-item .label small{
+  display:block;font-family:var(--font-mono);
+  font-size:.6rem;color:var(--fg3);
+}
+.data-item .value{
+  font-family:var(--font-mono);font-size:.78rem;
+  color:var(--fg);text-align:right;font-weight:400;
+  max-width:55%;word-break:break-word;
+}
+.data-item .value.muted{color:var(--fg3);font-style:italic}
+.data-item .value.highlight{color:var(--red2)}
+
+/* Film sim badge */
+.film-sim-display{
+  padding:.8rem;border-radius:var(--radius);
+  background:var(--red-dim);border:1px solid rgba(200,48,42,.2);
+  text-align:center;margin-bottom:.6rem;
+}
+.film-sim-display .sim-name{
+  font-family:var(--font-jp);font-size:1.4rem;
+  font-weight:700;color:var(--fg);
+}
+.film-sim-display .sim-name-cn{
+  font-size:.8rem;color:var(--red2);margin-top:.15rem;
+}
+
+/* Raw EXIF table */
+.raw-exif{max-height:350px;overflow-y:auto;scrollbar-width:thin}
+.raw-exif table{width:100%;border-collapse:collapse;font-size:.72rem}
+.raw-exif th,.raw-exif td{
+  padding:.35rem .6rem;text-align:left;border-bottom:1px solid var(--border);
+}
+.raw-exif th{
+  font-family:var(--font-mono);color:var(--fg3);font-weight:400;
+  position:sticky;top:0;background:var(--card);
+}
+.raw-exif td:first-child{font-family:var(--font-mono);color:var(--red2);white-space:nowrap}
+.raw-exif td:last-child{color:var(--fg2);word-break:break-all}
+
+/* --- Toast --- */
+.toast{
+  position:fixed;bottom:2rem;left:50%;transform:translateX(-50%) translateY(20px);
+  font-family:var(--font-mono);font-size:.75rem;
+  padding:.6rem 1.5rem;border-radius:var(--radius);
+  background:var(--bg4);border:1px solid var(--border2);color:var(--fg);
+  opacity:0;transition:all .3s ease;z-index:100;pointer-events:none;
+}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+
+/* --- Error --- */
+.error-msg{
+  padding:1rem;border-radius:var(--radius);
+  background:rgba(200,48,42,.08);border:1px solid rgba(200,48,42,.2);
+  color:var(--red2);font-size:.8rem;margin:.5rem 0;
+}
+
+/* --- Empty state --- */
+.empty-state{text-align:center;padding:4rem 2rem;color:var(--fg3)}
+.empty-state p{font-size:.85rem}
+
+/* --- Scrollbar --- */
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
+
+/* --- Footer --- */
+.footer{
+  text-align:center;padding:2rem;
+  font-family:var(--font-mono);font-size:.65rem;color:var(--fg3);
+  letter-spacing:.1em;
+}
+
+</style>
+</head>
+<body>
+<!-- HEADER -->
+<div class="header">
+  <h1>富士 <span>EXIF</span> 解析器</h1>
+  <div class="subtitle">Fujifilm Parameter Reader &mdash; RAF &bull; JPEG &bull; TIFF</div>
+</div>
+
+<div class="container">
+  <!-- DROP ZONE -->
+  <div class="dropzone" id="dropzone">
+    <svg class="dropzone-icon" viewBox="0 0 48 48" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="4" y="12" width="40" height="28" rx="4"/>
+      <path d="M15 12V8a3 3 0 013-3h12a3 3 0 013 3v4"/>
+      <circle cx="24" cy="26" r="8"/>
+      <circle cx="24" cy="26" r="3"/>
+      <circle cx="37" cy="18" r="2" fill="currentColor"/>
+    </svg>
+    <h2>拖放照片至此处</h2>
+    <p>或点击选择文件 — 支持多文件同时解析</p>
+    <div class="formats">
+      <span>.RAF</span><span>.JPG</span><span>.JPEG</span><span>.TIFF</span><span>.DNG</span>
+    </div>
+    <input type="file" id="fileInput" multiple accept=".raf,.jpg,.jpeg,.tiff,.tif,.dng,.png,.heic,.heif,.arw,.cr2,.cr3,.nef,.orf,.rw2">
+  </div>
+
+  <!-- TOOLBAR (hidden until files loaded) -->
+  <div class="toolbar" id="toolbar" style="display:none">
+    <button onclick="copyAll()">复制全部 / Copy All</button>
+    <button onclick="exportJSON()">导出 JSON / Export</button>
+    <button class="primary" onclick="clearAll()">清除 / Clear</button>
+  </div>
+
+  <!-- FILE TABS -->
+  <div class="file-tabs" id="fileTabs"></div>
+
+  <!-- RESULT PANEL -->
+  <div class="result-panel" id="resultPanel">
+    <div class="result-inner">
+      <div class="image-sidebar" id="imageSidebar"></div>
+      <div class="data-area" id="dataArea"></div>
+    </div>
+  </div>
+</div>
+
+<!-- TOAST -->
+<div class="toast" id="toast"></div>
+
+<div class="footer">FUJIFILM EXIF READER &mdash; ALL PROCESSING RUNS LOCALLY IN YOUR BROWSER</div>
+<script>
+// ============================================================
+// Fujifilm EXIF Reader — Core Application
+// ============================================================
+
+const state = { files: [], activeIndex: -1 };
+
+// ============================================================
+// Fujifilm MakerNote Binary Parser
+// ============================================================
+// exifr returns Fujifilm MakerNote as raw Uint8Array.
+// Fujifilm MakerNote format: 'FUJIFILM' (8 bytes) + LE uint32 IFD offset,
+// then standard TIFF IFD entries (all little-endian).
+
+function parseFujiMakerNote(raw) {
+  if (!raw || !(raw instanceof Uint8Array || raw.buffer)) return null;
+  const buf = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+  if (buf.length < 16) return null;
+
+  // Check 'FUJIFILM' header
+  const hdr = String.fromCharCode(...buf.slice(0, 8));
+  if (hdr !== 'FUJIFILM') return null;
+
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  const ifdOff = dv.getUint32(8, true); // LE
+  if (ifdOff + 2 > buf.length) return null;
+  const numEntries = dv.getUint16(ifdOff, true);
+
+  // TIFF type sizes: 1=BYTE(1), 2=ASCII(1), 3=SHORT(2), 4=LONG(4),
+  // 5=RATIONAL(8), 7=UNDEFINED(1), 8=SSHORT(2), 9=SLONG(4), 10=SRATIONAL(8)
+  const typeSizes = {1:1, 2:1, 3:2, 4:4, 5:8, 7:1, 8:2, 9:4, 10:8};
+
+  const tags = {};
+  for (let i = 0; i < numEntries; i++) {
+    const off = ifdOff + 2 + i * 12;
+    if (off + 12 > buf.length) break;
+    const tag = dv.getUint16(off, true);
+    const type = dv.getUint16(off + 2, true);
+    const count = dv.getUint32(off + 4, true);
+
+    const typeSize = typeSizes[type] || 1;
+    const totalBytes = typeSize * count;
+    // If total fits in 4 bytes, value is inline at off+8; otherwise it's an offset
+    const valOff = totalBytes <= 4 ? off + 8 : dv.getUint32(off + 8, true);
+
+    let value;
+    try {
+      if (type === 2) { // ASCII string
+        if (valOff + count <= buf.length) {
+          value = String.fromCharCode(...buf.slice(valOff, valOff + count)).replace(/\0+$/, '');
+        }
+      } else if (type === 3 && count === 1) { // USHORT
+        value = dv.getUint16(valOff, true);
+      } else if (type === 3 && count === 2) { // 2× USHORT
+        value = [dv.getUint16(valOff, true), dv.getUint16(valOff + 2, true)];
+      } else if (type === 3 && count === 3) { // 3× USHORT
+        value = [dv.getUint16(valOff, true), dv.getUint16(valOff + 2, true), dv.getUint16(valOff + 4, true)];
+      } else if (type === 4 && count === 1) { // ULONG
+        value = dv.getUint32(valOff, true);
+      } else if (type === 8 && count === 1) { // SSHORT
+        value = dv.getInt16(valOff, true);
+      } else if (type === 9 && count === 1) { // SLONG
+        value = dv.getInt32(valOff, true);
+      } else if (type === 9 && count === 2) { // 2× SLONG
+        if (valOff + 8 <= buf.length) {
+          value = [dv.getInt32(valOff, true), dv.getInt32(valOff + 4, true)];
+        }
+      } else if (type === 5 && count === 1) { // RATIONAL (unsigned)
+        if (valOff + 8 <= buf.length) {
+          const num = dv.getUint32(valOff, true);
+          const den = dv.getUint32(valOff + 4, true);
+          value = den ? num / den : num;
+        }
+      } else if (type === 10 && count === 1) { // SRATIONAL (signed)
+        if (valOff + 8 <= buf.length) {
+          const num = dv.getInt32(valOff, true);
+          const den = dv.getInt32(valOff + 4, true);
+          value = den ? num / den : num;
+        }
+      } else if (type === 7) { // UNDEFINED (raw bytes)
+        // Skip large blobs, only keep small ones
+        if (totalBytes <= 32 && valOff + totalBytes <= buf.length) {
+          value = Array.from(buf.slice(valOff, valOff + totalBytes));
+        } else {
+          value = `[${totalBytes} bytes]`;
+        }
+      }
+    } catch (_) {}
+    if (value !== undefined) tags[tag] = value;
+  }
+  return tags;
+}
+
+// Map raw MakerNote tags to human-friendly keys
+// Reference: ExifTool FujiFilm.pm tag definitions
+const FUJI_TAG_NAMES = {
+  0x0000: 'Version',
+  0x0010: 'InternalSerialNumber',
+  0x1000: 'Quality',
+  0x1001: 'Sharpness',
+  0x1002: 'FujiWhiteBalance',
+  0x1003: 'FujiSaturation',
+  0x1004: 'Contrast',
+  0x1005: 'ColorTemperature',
+  0x100a: 'WhiteBalanceFineTune',
+  0x100b: 'NoiseReductionOld',
+  0x100e: 'NoiseReduction',
+  0x100f: 'Clarity',
+  0x1010: 'FujiFlashMode',
+  0x1011: 'FlashExposureComp',
+  0x1020: 'Macro',
+  0x1021: 'FocusMode',
+  0x1022: 'AFMode',
+  0x1023: 'FocusPixel',
+  0x102b: 'PrioritySettings',
+  0x102d: 'FocusSettings',
+  0x102e: 'AFCSettings',
+  0x1030: 'SlowSync',
+  0x1031: 'PictureMode',
+  0x1032: 'ExposureCount',
+  0x1040: 'ShadowTone',
+  0x1041: 'HighlightTone',
+  0x1044: 'DigitalZoom',
+  0x1045: 'LensModulationOptimizer',
+  0x1047: 'GrainEffectRoughness',
+  0x1048: 'ColorChromeEffect',
+  0x1049: 'BWAdjustment',
+  0x104b: 'BWMagentaGreen',
+  0x104c: 'GrainEffectSize',
+  0x104d: 'CropMode',
+  0x104e: 'ColorChromeFXBlue',
+  0x1050: 'ShutterType',
+  0x1100: 'AutoBracketing',
+  0x1101: 'SequenceNumber',
+  0x1103: 'DriveSettings',
+  0x1200: 'AdvancedFilter',
+  0x1300: 'BlurWarning',
+  0x1301: 'FocusWarning',
+  0x1302: 'ExposureWarning',
+  0x1400: 'DynamicRange',
+  0x1401: 'FilmMode',
+  0x1402: 'DynamicRangeSetting',
+  0x1403: 'DevelopmentDynamicRange',
+  0x1404: 'MinFocalLength',
+  0x1405: 'MaxFocalLength',
+  0x1406: 'MaxApertureAtMinFocal',
+  0x1407: 'MaxApertureAtMaxFocal',
+  0x1422: 'ImageStabilization',
+  0x1431: 'Rating',
+  0x1436: 'ImageGeneration',
+  0x1438: 'ImageCount',
+  0x1443: 'DRangePriority',
+  0x1444: 'DRangePriorityAuto',
+  0x1445: 'DRangePriorityFixed',
+  0x1446: 'FlickerReduction',
+  0x1447: 'FujiModel',
+  0x1448: 'FujiModel2',
+  0x1449: 'FacesDetected',
+  0x144d: 'RollAngle',
+};
+
+function decodeFujiMakerNote(rawTags) {
+  if (!rawTags) return {};
+  const decoded = {};
+
+  for (const [tagNum, val] of Object.entries(rawTags)) {
+    const tag = parseInt(tagNum);
+    const name = FUJI_TAG_NAMES[tag] || `MakerNote_0x${tag.toString(16).padStart(4,'0')}`;
+    decoded[name] = val;
+  }
+  return decoded;
+}
+
+// --- Film Simulation Mapping ---
+const FILM_MODE_MAP = {
+  0x0000: ['Provia / Standard', '标准'],
+  0x0100: ['Studio Portrait', '棚拍人像'],
+  0x0110: ['Studio Portrait Enhanced', '棚拍人像增强'],
+  0x0120: ['Studio Portrait Smooth Skin', '棚拍柔肤'],
+  0x0130: ['Studio Portrait Smoother', '棚拍柔肤增强'],
+  0x0200: ['Fujichrome (F1a)', 'Fujichrome'],
+  0x0300: ['Studio Portrait Ex', '棚拍人像Ex'],
+  0x0400: ['Velvia / Vivid', '鲜艳'],
+  0x0500: ['Pro Neg. Std', '专业负片标准'],
+  0x0501: ['Pro Neg. Hi', '专业负片高对比'],
+  0x0600: ['Classic Chrome', '经典正片'],
+  0x0700: ['Eterna / Cinema', '影院'],
+  0x0800: ['Classic Negative', '经典负片'],
+  0x0900: ['Bleach Bypass', '银残'],
+  0x0a00: ['Nostalgic Neg', '怀旧负片'],
+  0x0b00: ['REALA ACE', 'REALA ACE'],
+};
+
+const WB_MAP = {
+  0x0: 'Auto', 0x1: 'Auto (White Priority)', 0x2: 'Auto (Ambiance Priority)',
+  0x100: 'Daylight / 日光', 0x200: 'Cloudy / 阴天',
+  0x300: 'Fluorescent (Daylight) / 荧光灯(日光)',
+  0x301: 'Fluorescent (Warm White) / 荧光灯(暖白)',
+  0x302: 'Fluorescent (Cool White) / 荧光灯(冷白)',
+  0x400: 'Incandescent / 白炽灯', 0x500: 'Flash / 闪光灯',
+  0x600: 'Underwater / 水下',
+  0xf00: 'Custom / 自定义', 0xf01: 'Custom2', 0xf02: 'Custom3',
+  0xff0: 'Kelvin / 色温',
+};
+
+const DR_MAP = { 0: 'Auto', 1: 'Standard (DR100)', 100: 'DR100', 200: 'DR200', 400: 'DR400' };
+
+const METERING_MAP = {
+  1: 'Average', 2: 'Center-Weighted', 3: 'Spot',
+  4: 'Multi-Spot', 5: 'Multi-Segment', 6: 'Partial',
+  256: 'Multi', 'Pattern': 'Multi-Segment',
+};
+
+const FOCUS_MODE_MAP = { 0: 'Auto / 自动', 1: 'Manual / 手动' };
+const AF_MODE_MAP = { 0: 'Single Point / 单点', 1: 'Zone / 区域', 256: 'Single Point / 单点' };
+const QUALITY_MAP = { 0: 'NORMAL', 1: 'NORMAL', 2: 'FINE', 3: 'S-FINE', 4: 'RAW', 5: 'RAW+FINE' };
+const SHUTTER_TYPE_MAP = { 0: 'Mechanical / 机械快门', 1: 'Electronic / 电子快门', 2: 'Electronic (Long) / 电子(长曝)', 3: 'Electronic Front Curtain / 电子前帘' };
+
+// Fujifilm Saturation tag encodes: high 8 bits = film sim hint, value itself = saturation
+// Known Saturation values:  0=Normal, 128=-2, 160=-1, 224=+1, 256=+2, 384=+3, 512=+4 (but these are non-standard)
+// Exiftool decodes this as: Saturation 224 → "+4 (highest)" for Fujifilm
+// The Fujifilm Saturation tag (0x1003) is NOT the same as film simulation
+function decodeFujiSaturation(val) {
+  if (val === undefined || val === null) return null;
+  const n = parseInt(val);
+  // Fujifilm encodes saturation/color values with 32 = one stop
+  // 0=0, 96=-2(SOFT2), 128=-1(SOFT), 160=-1, 192=0, 224=+1, 256=+2, 288=+3, 320=+4
+  // But actually the values from X-T5 are more like: raw 224 → "+4 (highest)" in exiftool
+  // exiftool source: (val / 32 - 8) for newer cameras, or lookup table
+  // Let's just use raw and signal it
+  return String(val);
+}
+
+function resolveFilmSim(exif) {
+  const fm = exif.FilmMode;
+  if (fm !== undefined && FILM_MODE_MAP[fm]) return FILM_MODE_MAP[fm];
+  if (fm !== undefined) return [`FilmMode 0x${fm.toString(16)}`, '未知模式'];
+  return null;
+}
+
+function fmtShutter(val) {
+  if (!val && val !== 0) return null;
+  if (val >= 1) return `${val}s`;
+  if (val === 0) return null;
+  const denom = Math.round(1 / val);
+  return `1/${denom}`;
+}
+
+function fmtExposureComp(val) {
+  if (val === undefined || val === null) return null;
+  const num = parseFloat(val);
+  if (isNaN(num)) return String(val);
+  if (num === 0) return '±0';
+  return num > 0 ? `+${num.toFixed(1)}` : num.toFixed(1);
+}
+
+function signedVal(val) {
+  if (val === undefined || val === null) return null;
+  const n = parseInt(val);
+  if (isNaN(n)) return String(val);
+  if (n === 0) return '0';
+  return n > 0 ? `+${n}` : `${n}`;
+}
+
+// Fujifilm uses these raw values for chrome/grain effect toggles:
+// 0 = Off, 32 = Weak, 64 = Strong
+function fujiTriStateLabel(val) {
+  if (val === undefined || val === null) return null;
+  const n = parseInt(val);
+  if (n === 0) return 'Off / 关';
+  if (n === 32) return 'Weak / 弱';
+  if (n === 64) return 'Strong / 强';
+  return String(val);
+}
+
+// Grain Effect Size: 0=Off, 16=Small, 32=Large
+function fujiGrainSizeLabel(val) {
+  if (val === undefined || val === null) return null;
+  const n = parseInt(val);
+  if (n === 0) return 'Off / 关';
+  if (n === 16) return 'Small / 小';
+  if (n === 32) return 'Large / 大';
+  return String(val);
+}
+
+// Noise reduction: raw value → human level
+// From exiftool: 0x100e NoiseReduction tag
+function fujiNoiseReductionLabel(val) {
+  if (val === undefined || val === null) return null;
+  const n = parseInt(val);
+  const NR_MAP = {
+    0x000: '0 (标准)',
+    0x100: '+2 (强)',
+    0x180: '+1 (较强)',
+    0x1c0: '+3 (很强)',
+    0x1e0: '+4 (最强)',
+    0x200: '-2 (弱)',
+    0x280: '-1 (较弱)',
+    0x2c0: '-3 (很弱)',
+    0x2e0: '-4 (最弱)',
+  };
+  if (NR_MAP[n] !== undefined) return NR_MAP[n];
+  return String(n);
+}
+
+// ShadowTone / HighlightTone: raw int32s → display value
+// Formula: display = -raw / 16
+function fujiToneLabel(val) {
+  if (val === undefined || val === null) return null;
+  const n = parseInt(val);
+  const display = -n / 16;
+  if (display === 0) return '0 (标准)';
+  const sign = display > 0 ? '+' : '';
+  return `${sign}${display}`;
+}
+
+// Clarity: raw int32s → display value
+// Formula: display = raw / 1000
+function fujiClarityLabel(val) {
+  if (val === undefined || val === null) return null;
+  const n = parseInt(val);
+  const display = n / 1000;
+  if (display === 0) return '0';
+  const sign = display > 0 ? '+' : '';
+  return `${sign}${display}`;
+}
+
+function pick(exif, ...keys) {
+  for (const k of keys) {
+    if (exif[k] !== undefined && exif[k] !== null) return exif[k];
+  }
+  return undefined;
+}
+
+
+// ============================================================
+// Drag & Drop / File Input
+// ============================================================
+
+const dropzone = document.getElementById('dropzone');
+const fileInput = document.getElementById('fileInput');
+
+dropzone.addEventListener('click', () => fileInput.click());
+dropzone.addEventListener('dragover', e => { e.preventDefault(); dropzone.classList.add('dragover'); });
+dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
+dropzone.addEventListener('drop', e => {
+  e.preventDefault(); dropzone.classList.remove('dragover');
+  handleFiles(e.dataTransfer.files);
+});
+fileInput.addEventListener('change', e => handleFiles(e.target.files));
+
+async function handleFiles(fileList) {
+  if (!fileList || !fileList.length) return;
+  for (const file of fileList) {
+    await processFile(file);
+  }
+  if (state.files.length > 0 && state.activeIndex === -1) {
+    setActive(0);
+  }
+}
+
+async function processFile(file) {
+  try {
+    // First pass: get standard EXIF with mergeOutput
+    const exif = await exifr.parse(file, {
+      tiff: true, xmp: true, icc: false, iptc: true,
+      jfif: false, ihdr: false,
+      translateKeys: true, translateValues: true,
+      mergeOutput: true, sanitize: false,
+      makerNote: true, userComment: true,
+    });
+
+    if (!exif || Object.keys(exif).length === 0) {
+      showToast('无法解析 EXIF: ' + file.name);
+      return;
+    }
+
+    // Second pass: get raw MakerNote binary for Fujifilm parsing
+    let fujiTags = {};
+    try {
+      const raw = await exifr.parse(file, {
+        tiff: true, makerNote: true,
+        mergeOutput: false, translateKeys: false, translateValues: false,
+        sanitize: false,
+      });
+      if (raw && raw.makerNote) {
+        const mnBuf = raw.makerNote;
+        const parsed = parseFujiMakerNote(mnBuf);
+        if (parsed) {
+          fujiTags = decodeFujiMakerNote(parsed);
+          console.log('Fujifilm MakerNote decoded:', fujiTags);
+        }
+      }
+    } catch (e) {
+      console.warn('MakerNote parse failed:', e);
+    }
+
+    let thumbUrl = null;
+    try {
+      thumbUrl = await exifr.thumbnailUrl(file);
+    } catch (_) {}
+    if (!thumbUrl) {
+      if (file.type && file.type.startsWith('image/')) {
+        thumbUrl = URL.createObjectURL(file);
+      } else {
+        // For RAF/RAW files without MIME, try objectURL anyway
+        thumbUrl = URL.createObjectURL(file);
+      }
+    }
+
+    const entry = { name: file.name, exif, fujiTags, thumbUrl, file };
+    state.files.push(entry);
+    renderTabs();
+    setActive(state.files.length - 1);
+    document.getElementById('toolbar').style.display = 'flex';
+  } catch (err) {
+    console.error(err);
+    showToast('解析失败: ' + file.name + ' — ' + err.message);
+  }
+}
+
+
+// ============================================================
+// Tabs
+// ============================================================
+
+function renderTabs() {
+  const container = document.getElementById('fileTabs');
+  container.innerHTML = state.files.map((f, i) =>
+    `<div class="file-tab ${i === state.activeIndex ? 'active' : ''}" onclick="setActive(${i})">
+      ${f.name}
+      <span class="close" onclick="event.stopPropagation();removeFile(${i})">&times;</span>
+    </div>`
+  ).join('');
+}
+
+function setActive(idx) {
+  state.activeIndex = idx;
+  renderTabs();
+  renderResult(state.files[idx]);
+}
+
+function removeFile(idx) {
+  state.files.splice(idx, 1);
+  if (state.files.length === 0) {
+    state.activeIndex = -1;
+    document.getElementById('resultPanel').classList.remove('visible');
+    document.getElementById('toolbar').style.display = 'none';
+    document.getElementById('fileTabs').innerHTML = '';
+    return;
+  }
+  if (state.activeIndex >= state.files.length) state.activeIndex = state.files.length - 1;
+  renderTabs();
+  renderResult(state.files[state.activeIndex]);
+}
+
+function clearAll() {
+  state.files = [];
+  state.activeIndex = -1;
+  document.getElementById('resultPanel').classList.remove('visible');
+  document.getElementById('toolbar').style.display = 'none';
+  document.getElementById('fileTabs').innerHTML = '';
+}
+
+
+// ============================================================
+// Render Result
+// ============================================================
+
+function renderResult(entry) {
+  const panel = document.getElementById('resultPanel');
+  panel.classList.add('visible');
+
+  const { exif, fujiTags, thumbUrl, name } = entry;
+  const ft = fujiTags || {};
+
+  // --- Sidebar ---
+  const sidebar = document.getElementById('imageSidebar');
+  const model = pick(exif, 'Model', 'model', 'UniqueCameraModel') || '';
+  const iso = pick(exif, 'ISO', 'ISOSpeed', 'PhotographicSensitivity');
+  const fnum = pick(exif, 'FNumber');
+  const ss = pick(exif, 'ExposureTime');
+  const fl = pick(exif, 'FocalLength');
+
+  sidebar.innerHTML = `
+    ${thumbUrl ? `<img src="${thumbUrl}" alt="preview" onerror="this.style.display='none'">` : ''}
+    <div class="filename">${name}</div>
+    ${model ? `<div class="camera-badge">${model}</div>` : ''}
+    <div class="quick-specs">
+      <div class="quick-spec"><div class="val">${iso ?? '—'}</div><div class="lbl">ISO</div></div>
+      <div class="quick-spec"><div class="val">${fnum ? 'f/' + (typeof fnum === 'number' ? fnum.toFixed(1) : fnum) : '—'}</div><div class="lbl">光圈</div></div>
+      <div class="quick-spec"><div class="val">${fmtShutter(ss) ?? '—'}</div><div class="lbl">快门</div></div>
+      <div class="quick-spec"><div class="val">${fl ? fl + 'mm' : '—'}</div><div class="lbl">焦距</div></div>
+    </div>
+  `;
+
+  // --- Data Area ---
+  const dataArea = document.getElementById('dataArea');
+  dataArea.innerHTML = '';
+
+  // 1. Film Simulation (from MakerNote)
+  const filmSim = resolveFilmSim(ft);
+  dataArea.innerHTML += buildFilmSimSection(filmSim, ft);
+
+  // 2. Basic Shooting
+  dataArea.innerHTML += buildSection('基本拍摄信息', 'Basic Shooting Info', svgCamera(), [
+    ['相机厂商', 'Make', pick(exif, 'Make'), false],
+    ['机身型号', 'Model', model, false],
+    ['镜头', 'Lens', pick(exif, 'LensModel', 'Lens'), false],
+    ['镜头厂商', 'Lens Make', pick(exif, 'LensMake'), false],
+    ['焦距', 'Focal Length', fl ? fl + 'mm' : null, false],
+    ['等效焦距', '35mm Equiv.', pick(exif, 'FocalLengthIn35mmFormat') ? pick(exif, 'FocalLengthIn35mmFormat') + 'mm' : null, false],
+    ['ISO', 'ISO', iso, false],
+    ['光圈', 'Aperture', fnum ? 'f/' + (typeof fnum === 'number' ? fnum.toFixed(1) : fnum) : null, false],
+    ['快门速度', 'Shutter Speed', fmtShutter(ss), false],
+    ['曝光补偿', 'Exp. Comp.', fmtExposureComp(pick(exif, 'ExposureCompensation')), false],
+    ['曝光程序', 'Exp. Program', pick(exif, 'ExposureProgram'), false],
+    ['测光模式', 'Metering', METERING_MAP[pick(exif, 'MeteringMode')] ?? pick(exif, 'MeteringMode'), false],
+    ['闪光灯', 'Flash', pick(exif, 'Flash'), false],
+    ['对焦模式', 'Focus Mode', ft.FocusMode !== undefined ? (FOCUS_MODE_MAP[ft.FocusMode] ?? ft.FocusMode) : null, false],
+    ['AF 模式', 'AF Mode', ft.AFMode !== undefined ? (AF_MODE_MAP[ft.AFMode] ?? ft.AFMode) : null, false],
+    ['快门类型', 'Shutter Type', ft.ShutterType !== undefined ? (SHUTTER_TYPE_MAP[ft.ShutterType] ?? ft.ShutterType) : null, false],
+    ['画质', 'Quality', ft.Quality ?? null, false],
+    ['图像尺寸', 'Image Size', (pick(exif, 'ExifImageWidth') && pick(exif, 'ExifImageHeight')) ? `${pick(exif, 'ExifImageWidth')} × ${pick(exif, 'ExifImageHeight')}` : null, false],
+    ['拍摄时间', 'Date/Time', pick(exif, 'DateTimeOriginal', 'CreateDate') ? new Date(pick(exif, 'DateTimeOriginal', 'CreateDate')).toLocaleString('zh-CN') : null, false],
+    ['序列号', 'Serial No.', pick(exif, 'SerialNumber'), false],
+  ]);
+
+  // 3. Color & Tone (from MakerNote)
+  const wbMode = ft.FujiWhiteBalance;
+  const wbFine = ft.WhiteBalanceFineTune;
+  let wbShiftStr = null;
+  if (wbFine !== undefined) {
+    if (Array.isArray(wbFine)) wbShiftStr = `R:${signedVal(wbFine[0])} B:${signedVal(wbFine[1])}`;
+    else wbShiftStr = signedVal(wbFine);
+  }
+
+  const colorTemp = ft.ColorTemperature;
+
+  dataArea.innerHTML += buildSection('色彩与色调设置', 'Color & Tone', svgPalette(), [
+    ['白平衡', 'White Balance', wbMode !== undefined ? (WB_MAP[wbMode] ?? `0x${wbMode.toString(16)}`) : pick(exif, 'WhiteBalance'), false],
+    ['色温', 'Color Temp.', colorTemp ? colorTemp + 'K' : null, false],
+    ['白平衡微调', 'WB Fine Tune', wbShiftStr, false],
+    ['高光色调', 'Highlight Tone', fujiToneLabel(ft.HighlightTone), false],
+    ['阴影色调', 'Shadow Tone', fujiToneLabel(ft.ShadowTone), false],
+    ['色彩/饱和度', 'Color / Saturation', ft.FujiSaturation !== undefined ? decodeFujiSaturation(ft.FujiSaturation) + ' (raw)' : null, false],
+    ['锐度', 'Sharpness', pick(exif, 'Sharpness'), false],
+    ['降噪', 'Noise Reduction', fujiNoiseReductionLabel(ft.NoiseReduction), false],
+    ['清晰度', 'Clarity', fujiClarityLabel(ft.Clarity), false],
+    ['色彩浓郁效果', 'Color Chrome Effect', fujiTriStateLabel(ft.ColorChromeEffect), false],
+    ['蓝色浓郁效果', 'Color Chrome FX Blue', fujiTriStateLabel(ft.ColorChromeFXBlue), false],
+    ['镜头优化', 'Lens Mod. Optimizer', ft.LensModulationOptimizer !== undefined ? (ft.LensModulationOptimizer === 1 ? 'On / 开' : 'Off / 关') : null, false],
+  ]);
+
+  // 4. Dynamic Range & Grain (from MakerNote)
+  const dr = ft.DynamicRange;
+  const drPriorityAuto = ft.DRangePriorityAuto;
+  const drPriorityFixed = ft.DRangePriorityFixed;
+
+  dataArea.innerHTML += buildSection('动态范围与颗粒', 'Dynamic Range & Grain', svgSliders(), [
+    ['动态范围', 'Dynamic Range', dr !== undefined ? (DR_MAP[dr] ?? ('DR' + dr)) : null, false],
+    ['D范围优先级', 'D-Range Priority', ft.DRangePriority !== undefined ? (ft.DRangePriority === 0 ? 'Auto / 自动' : 'Fixed / 固定') : null, false],
+    ['D范围优先级(自动)', 'D-Range Auto', drPriorityAuto !== undefined ? ({1: 'Weak / 弱', 2: 'Strong / 强'}[drPriorityAuto] ?? drPriorityAuto) : null, false],
+    ['D范围优先级(固定)', 'D-Range Fixed', drPriorityFixed !== undefined ? ({1: 'Weak / 弱', 2: 'Strong / 强'}[drPriorityFixed] ?? drPriorityFixed) : null, false],
+    ['颗粒效果', 'Grain Roughness', fujiTriStateLabel(ft.GrainEffectRoughness), false],
+    ['颗粒尺寸', 'Grain Size', fujiGrainSizeLabel(ft.GrainEffectSize), false],
+  ]);
+
+  // 5. Raw EXIF + MakerNote combined
+  const combined = { ...exif };
+  // Add decoded fuji tags with prefix
+  for (const [k, v] of Object.entries(ft)) {
+    combined['[Fuji] ' + k] = v;
+  }
+  dataArea.innerHTML += buildRawSection(combined);
+}
+
+
+// ============================================================
+// Section Builders
+// ============================================================
+
+function buildFilmSimSection(filmSim, ft) {
+  if (!filmSim) {
+    const fm = ft.FilmMode;
+    if (fm !== undefined) {
+      return `
+        <div class="data-section">
+          <div class="film-sim-display">
+            <div class="sim-name">FilmMode: 0x${fm.toString(16)}</div>
+            <div class="sim-name-cn">胶片模拟 (未识别)</div>
+          </div>
+        </div>`;
+    }
+    return '';
+  }
+  return `
+    <div class="data-section">
+      <div class="film-sim-display">
+        <div class="sim-name">${filmSim[0]}</div>
+        <div class="sim-name-cn">${filmSim[1] || '胶片模拟'}</div>
+      </div>
+    </div>`;
+}
+
+function buildSection(titleCn, titleEn, iconSvg, items) {
+  const rows = items.map(([cn, en, val, hl]) => {
+    const display = val !== undefined && val !== null && val !== '' ? String(val) : null;
+    return `<div class="data-item">
+      <div class="label">${cn}<small>${en}</small></div>
+      <div class="value ${display === null ? 'muted' : ''} ${hl ? 'highlight' : ''}">${display ?? '—'}</div>
+    </div>`;
+  }).join('');
+
+  return `
+    <div class="data-section" onclick="this.classList.toggle('collapsed')">
+      <div class="data-section-header">
+        ${iconSvg}
+        <h3>${titleCn} <span style="color:var(--fg3);font-family:var(--font-mono);font-size:.7rem;margin-left:.3rem">${titleEn}</span></h3>
+        <svg class="chevron" viewBox="0 0 16 16" fill="none" stroke-width="1.5"><path d="M4 6l4 4 4-4"/></svg>
+      </div>
+      <div class="data-grid">${rows}</div>
+    </div>`;
+}
+
+function buildRawSection(exif) {
+  const sorted = Object.keys(exif).sort();
+  const rows = sorted.map(k => {
+    let v = exif[k];
+    if (v instanceof Date) v = v.toISOString();
+    else if (v instanceof Uint8Array || v instanceof ArrayBuffer) v = `[Binary ${v.byteLength ?? v.length} bytes]`;
+    else if (typeof v === 'object' && v !== null) {
+      try { v = JSON.stringify(v); } catch(_) { v = String(v); }
+    }
+    return `<tr><td>${k}</td><td>${String(v)}</td></tr>`;
+  }).join('');
+
+  return `
+    <div class="data-section collapsed" onclick="this.classList.toggle('collapsed')">
+      <div class="data-section-header">
+        ${svgCode()}
+        <h3>原始 EXIF 数据 <span style="color:var(--fg3);font-family:var(--font-mono);font-size:.7rem;margin-left:.3rem">Raw EXIF (${sorted.length} fields)</span></h3>
+        <svg class="chevron" viewBox="0 0 16 16" fill="none" stroke-width="1.5"><path d="M4 6l4 4 4-4"/></svg>
+      </div>
+      <div class="data-grid" style="display:none">
+        <div class="raw-exif" style="grid-column:1/-1">
+          <table><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody>${rows}</tbody></table>
+        </div>
+      </div>
+    </div>`;
+}
+
+
+// ============================================================
+// Icons (inline SVG)
+// ============================================================
+
+function svgCamera() {
+  return `<svg class="icon" viewBox="0 0 20 20" fill="none" stroke-width="1.5"><rect x="2" y="5" width="16" height="12" rx="2"/><path d="M7 5V4a1 1 0 011-1h4a1 1 0 011 1v1"/><circle cx="10" cy="11" r="3"/></svg>`;
+}
+function svgPalette() {
+  return `<svg class="icon" viewBox="0 0 20 20" fill="none" stroke-width="1.5"><circle cx="10" cy="10" r="8"/><circle cx="10" cy="6" r="1.5" fill="currentColor"/><circle cx="6.5" cy="9" r="1.5" fill="currentColor"/><circle cx="8" cy="13" r="1.5" fill="currentColor"/></svg>`;
+}
+function svgSliders() {
+  return `<svg class="icon" viewBox="0 0 20 20" fill="none" stroke-width="1.5"><line x1="4" y1="6" x2="16" y2="6"/><line x1="4" y1="10" x2="16" y2="10"/><line x1="4" y1="14" x2="16" y2="14"/><circle cx="8" cy="6" r="1.5" fill="var(--card)"/><circle cx="12" cy="10" r="1.5" fill="var(--card)"/><circle cx="7" cy="14" r="1.5" fill="var(--card)"/></svg>`;
+}
+function svgCode() {
+  return `<svg class="icon" viewBox="0 0 20 20" fill="none" stroke-width="1.5"><polyline points="7,5 3,10 7,15"/><polyline points="13,5 17,10 13,15"/><line x1="11" y1="3" x2="9" y2="17"/></svg>`;
+}
+
+
+// ============================================================
+// Export & Copy
+// ============================================================
+
+function copyAll() {
+  if (state.activeIndex < 0) return;
+  const entry = state.files[state.activeIndex];
+  const text = formatExifText(entry);
+  navigator.clipboard.writeText(text).then(() => showToast('已复制到剪贴板'));
+}
+
+function exportJSON() {
+  if (state.activeIndex < 0) return;
+  const entry = state.files[state.activeIndex];
+  const clean = {};
+  for (const [k, v] of Object.entries(entry.exif)) {
+    if (v instanceof Uint8Array || v instanceof ArrayBuffer) continue;
+    if (v instanceof Date) { clean[k] = v.toISOString(); continue; }
+    clean[k] = v;
+  }
+  // Include decoded Fuji MakerNote tags
+  if (entry.fujiTags && Object.keys(entry.fujiTags).length > 0) {
+    clean._fujifilmMakerNote = entry.fujiTags;
+    // Also add human-readable film simulation
+    const filmSim = resolveFilmSim(entry.fujiTags);
+    if (filmSim) clean._filmSimulation = filmSim[0] + ' (' + filmSim[1] + ')';
+  }
+  const blob = new Blob([JSON.stringify(clean, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = entry.name.replace(/\.[^.]+$/, '') + '_exif.json';
+  a.click();
+  URL.revokeObjectURL(url);
+  showToast('JSON 已导出');
+}
+
+function formatExifText(entry) {
+  const e = entry.exif;
+  const ft = entry.fujiTags || {};
+  const lines = [`== ${entry.name} ==\n`];
+  const filmSim = resolveFilmSim(ft);
+  if (filmSim) lines.push(`胶片模拟 Film Simulation: ${filmSim[0]} (${filmSim[1]})`);
+  lines.push(`相机 Camera: ${pick(e, 'Make') || ''} ${pick(e, 'Model') || ''}`);
+  lines.push(`镜头 Lens: ${pick(e, 'LensModel') || '—'}`);
+  lines.push(`ISO: ${pick(e, 'ISO') || '—'}`);
+  lines.push(`光圈 Aperture: f/${pick(e, 'FNumber') || '—'}`);
+  lines.push(`快门 Shutter: ${fmtShutter(pick(e, 'ExposureTime')) || '—'}`);
+  lines.push(`焦距 Focal Length: ${pick(e, 'FocalLength') || '—'}mm (${pick(e, 'FocalLengthIn35mmFormat') || '—'}mm equiv.)`);
+  lines.push(`曝光补偿 Exp Comp: ${fmtExposureComp(pick(e, 'ExposureCompensation')) || '—'}`);
+  lines.push(`白平衡 WB: ${ft.FujiWhiteBalance !== undefined ? (WB_MAP[ft.FujiWhiteBalance] ?? ft.FujiWhiteBalance) : (pick(e, 'WhiteBalance') || '—')}`);
+  if (ft.WhiteBalanceFineTune) {
+    const wbf = ft.WhiteBalanceFineTune;
+    lines.push(`白平衡微调 WB Fine: R:${Array.isArray(wbf) ? signedVal(wbf[0]) : signedVal(wbf)} B:${Array.isArray(wbf) ? signedVal(wbf[1]) : ''}`);
+  }
+  lines.push(`高光色调 Highlight Tone: ${fujiToneLabel(ft.HighlightTone) || '—'}`);
+  lines.push(`阴影色调 Shadow Tone: ${fujiToneLabel(ft.ShadowTone) || '—'}`);
+  lines.push(`锐度 Sharpness: ${pick(e, 'Sharpness') || '—'}`);
+  lines.push(`降噪 NR: ${fujiNoiseReductionLabel(ft.NoiseReduction) || '—'}`);
+  lines.push(`清晰度 Clarity: ${fujiClarityLabel(ft.Clarity) || '—'}`);
+  lines.push(`色彩浓郁 Color Chrome: ${fujiTriStateLabel(ft.ColorChromeEffect) || '—'}`);
+  lines.push(`蓝色浓郁 Color Chrome FX Blue: ${fujiTriStateLabel(ft.ColorChromeFXBlue) || '—'}`);
+  lines.push(`动态范围 DR: ${ft.DynamicRange !== undefined ? (DR_MAP[ft.DynamicRange] ?? ft.DynamicRange) : '—'}`);
+  lines.push(`颗粒效果 Grain: ${fujiTriStateLabel(ft.GrainEffectRoughness) || '—'}`);
+  lines.push(`颗粒尺寸 Grain Size: ${fujiGrainSizeLabel(ft.GrainEffectSize) || '—'}`);
+  lines.push(`快门类型 Shutter: ${ft.ShutterType !== undefined ? (SHUTTER_TYPE_MAP[ft.ShutterType] ?? ft.ShutterType) : '—'}`);
+  return lines.join('\n');
+}
+
+
+// ============================================================
+// Toast
+// ============================================================
+
+let toastTimer;
+function showToast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 2500);
+}
+</script>
+<script defer src="https://static.cloudflareinsights.com/beacon.min.js/v8c78df7c7c0f484497ecbca7046644da1771523124516" integrity="sha512-8DS7rgIrAmghBFwoOTujcf6D9rXvH8xm8JQ1Ja01h9QX8EzXldiszufYa4IFfKdLUKTTrnSFXLDkUEOTrZQ8Qg==" data-cf-beacon='{"version":"2024.11.0","token":"75124c326cb447fe934cde04713ae013","r":1,"server_timing":{"name":{"cfCacheStatus":true,"cfEdge":true,"cfExtPri":true,"cfL4":true,"cfOrigin":true,"cfSpeedBrain":true},"location_startswith":null}}' crossorigin="anonymous"></script>
+</body>
+</html>
