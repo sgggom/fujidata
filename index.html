@@ -6,7 +6,8 @@
 <title>富士 EXIF 解析器 — Fujifilm Parameter Reader</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+JP:wght@200;400;700&family=DM+Mono:wght@300;400;500&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
-<script src="https://cdn.jsdelivr.net/npm/exifr/dist/full.umd.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/exifr@7.1.3/dist/full.umd.js"></script>
+<script src="metadata-reader.js?v=1"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -613,39 +614,10 @@ async function processRafFile(file) {
 
   const { jpegData, rafModel } = extractJpegFromRaf(arrayBuffer);
 
-  // Parse EXIF from the embedded JPEG using exifr
-  // Pass 1: standard EXIF with merged output
-  const exif = await exifr.parse(jpegData, {
-    tiff: true, xmp: true, icc: false, iptc: true,
-    jfif: false, ihdr: false,
-    translateKeys: true, translateValues: true,
-    mergeOutput: true, sanitize: false,
-    makerNote: true, userComment: true,
-  });
+  const exif = await readStandardExif(jpegData);
 
-  if (!exif || Object.keys(exif).length === 0) {
-    throw new Error('RAF: Failed to parse EXIF from embedded JPEG');
-  }
-
-  // Pass 2: raw MakerNote binary
-  let fujiTags = {};
-  try {
-    const raw = await exifr.parse(jpegData, {
-      tiff: true, makerNote: true,
-      mergeOutput: false, translateKeys: false, translateValues: false,
-      sanitize: false,
-    });
-    const makerNote = getMakerNote(raw) || getMakerNote(exif);
-    if (makerNote) {
-      const parsed = parseFujiMakerNote(makerNote);
-      if (parsed) {
-        fujiTags = decodeFujiMakerNote(parsed);
-        console.log('RAF: Fujifilm MakerNote decoded:', fujiTags);
-      }
-    }
-  } catch (e) {
-    console.warn('RAF: MakerNote parse failed:', e);
-  }
+  const { fujiTags, metadataDiagnostic } = await readFujiMetadata(jpegData, exif);
+  metadataDiagnostic.scope = 'RAF embedded JPEG';
 
   // Generate thumbnail from the embedded JPEG
   const jpegBlob = new Blob([jpegData], { type: 'image/jpeg' });
@@ -657,7 +629,7 @@ async function processRafFile(file) {
     thumbUrl = URL.createObjectURL(jpegBlob);
   }
 
-  return { exif, fujiTags, thumbUrl, jpegBlob };
+  return { exif, fujiTags, metadataDiagnostic, thumbUrl, jpegBlob };
 }
 
 
@@ -674,6 +646,90 @@ function getMakerNote(result) {
   return null;
 }
 
+async function readStandardExif(input) {
+  try {
+    return await exifr.parse(input, {
+      tiff: true, xmp: true, icc: false, iptc: true,
+      jfif: false, ihdr: false, translateKeys: true, translateValues: true,
+      mergeOutput: true, sanitize: false, makerNote: true, userComment: true,
+    }) || {};
+  } catch (error) {
+    // A library failure must not prevent the independent byte-level fallback.
+    console.warn('Standard EXIF parse failed; continuing with direct inspection:', error);
+    return {};
+  }
+}
+
+function asBytes(value) {
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  return null;
+}
+
+function hasFujiSignature(value) {
+  const bytes = asBytes(value);
+  return !!bytes && bytes.length >= 8 && String.fromCharCode(...bytes.subarray(0, 8)) === 'FUJIFILM';
+}
+
+// Inspect the actual bytes received by this page independently of exifr.
+// Never infer that the Photos original lacks metadata from a picker-provided copy.
+async function readFujiMetadata(input, exif) {
+  let libraryNote = getMakerNote(exif);
+  const diagnostic = {
+    version: 2, scope: 'selected file', container: 'unknown', directStatus: 'error',
+    exifFound: false, libraryMakerNoteBytes: libraryNote?.byteLength || 0,
+    directMakerNoteBytes: 0, makerNoteOffset: null, fujiSignature: false,
+    decodeSource: 'none', decodeStatus: 'missing', fujiFieldCount: 0, warnings: [],
+  };
+  if (!libraryNote) {
+    try {
+      const raw = await exifr.parse(input, {
+        tiff: true, makerNote: true, mergeOutput: false,
+        translateKeys: false, translateValues: false, sanitize: false,
+      });
+      libraryNote = getMakerNote(raw);
+      diagnostic.libraryMakerNoteBytes = libraryNote?.byteLength || 0;
+    } catch (_) {
+      diagnostic.warnings.push('exifr MakerNote pass failed');
+    }
+  }
+  let directNote = null;
+  try {
+    const bytes = asBytes(input) || new Uint8Array(await input.arrayBuffer());
+    diagnostic.inputHeaderHex = Array.from(bytes.subarray(0, 16), b => b.toString(16).padStart(2, '0')).join('');
+    const inspected = FujiMetadata.inspect(bytes);
+    diagnostic.container = inspected.container;
+    diagnostic.directStatus = inspected.status;
+    diagnostic.exifFound = inspected.exifFound;
+    diagnostic.makerNoteOffset = inspected.makerNoteOffset;
+    diagnostic.warnings.push(...inspected.warnings);
+    directNote = inspected.makerNote;
+    diagnostic.directMakerNoteBytes = directNote?.byteLength || 0;
+  } catch (_) {
+    diagnostic.warnings.push('Direct byte inspection failed; absence is not established');
+  }
+  const noteHeader = asBytes(directNote || libraryNote);
+  diagnostic.makerNoteHeaderHex = noteHeader ? Array.from(noteHeader.subarray(0, 16), b => b.toString(16).padStart(2, '0')).join('') : null;
+  let fujiTags = {};
+  for (const [source, note] of [['direct', directNote], ['exifr', libraryNote]]) {
+    if (!note) continue;
+    if (diagnostic.decodeStatus === 'missing') diagnostic.decodeStatus = 'non-fuji';
+    if (!hasFujiSignature(note)) continue;
+    diagnostic.fujiSignature = true;
+    diagnostic.decodeStatus = 'invalid';
+    const parsed = parseFujiMakerNote(note);
+    if (parsed && Object.keys(parsed).length) {
+      fujiTags = decodeFujiMakerNote(parsed);
+      diagnostic.decodeSource = source;
+      diagnostic.makerNoteHeaderHex = Array.from(asBytes(note).subarray(0, 16), b => b.toString(16).padStart(2, '0')).join('');
+      diagnostic.decodeStatus = 'decoded';
+      break;
+    }
+  }
+  diagnostic.fujiFieldCount = Object.keys(fujiTags).length;
+  return { fujiTags, metadataDiagnostic: diagnostic };
+}
+
 function parseFujiMakerNote(raw) {
   if (!raw) return null;
   const buf = raw instanceof ArrayBuffer ? new Uint8Array(raw)
@@ -688,8 +744,9 @@ function parseFujiMakerNote(raw) {
 
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   const ifdOff = dv.getUint32(8, true); // LE
-  if (ifdOff + 2 > buf.length) return null;
+  if (ifdOff < 12 || ifdOff + 2 > buf.length) return null;
   const numEntries = dv.getUint16(ifdOff, true);
+  if (ifdOff + 2 + numEntries * 12 > buf.length) return null;
 
   // TIFF type sizes: 1=BYTE(1), 2=ASCII(1), 3=SHORT(2), 4=LONG(4),
   // 5=RATIONAL(8), 7=UNDEFINED(1), 8=SSHORT(2), 9=SLONG(4), 10=SRATIONAL(8)
@@ -703,10 +760,12 @@ function parseFujiMakerNote(raw) {
     const type = dv.getUint16(off + 2, true);
     const count = dv.getUint32(off + 4, true);
 
-    const typeSize = typeSizes[type] || 1;
+    const typeSize = typeSizes[type];
+    if (!typeSize || count === 0) continue;
     const totalBytes = typeSize * count;
     // If total fits in 4 bytes, value is inline at off+8; otherwise it's an offset
     const valOff = totalBytes <= 4 ? off + 8 : dv.getUint32(off + 8, true);
+    if (valOff + totalBytes > buf.length) continue;
 
     let value;
     try {
@@ -1061,21 +1120,21 @@ for (const input of [fileInput, photoInput]) {
   input.addEventListener('change', e => {
     const files = Array.from(e.target.files || []);
     e.target.value = ''; // Allow choosing the same original again for comparison.
-    handleFiles(files);
+    handleFiles(files, input === photoInput ? 'photo-library' : 'files');
   });
 }
 
-async function handleFiles(fileList) {
+async function handleFiles(fileList, importSource = 'drop') {
   if (!fileList || !fileList.length) return;
   for (const file of fileList) {
-    await processFile(file);
+    await processFile(file, importSource);
   }
   if (state.files.length > 0 && state.activeIndex === -1) {
     setActive(0);
   }
 }
 
-async function processFile(file) {
+async function processFile(file, importSource = 'unknown') {
   try {
     // Detect RAF files by extension or by reading magic bytes
     const isRaf = file.name.toLowerCase().endsWith('.raf');
@@ -1087,6 +1146,8 @@ async function processFile(file) {
         name: file.name,
         exif: result.exif,
         fujiTags: result.fujiTags,
+        metadataDiagnostic: result.metadataDiagnostic,
+        importSource,
         thumbUrl: result.thumbUrl,
         file,
         _rafJpegBlob: result.jpegBlob, // keep for editor
@@ -1099,39 +1160,10 @@ async function processFile(file) {
     }
 
     // --- Standard files (JPEG, TIFF, DNG, etc.) ---
-    // First pass: get standard EXIF with mergeOutput
-    const exif = await exifr.parse(file, {
-      tiff: true, xmp: true, icc: false, iptc: true,
-      jfif: false, ihdr: false,
-      translateKeys: true, translateValues: true,
-      mergeOutput: true, sanitize: false,
-      makerNote: true, userComment: true,
-    });
+    const exif = await readStandardExif(file);
 
-    if (!exif || Object.keys(exif).length === 0) {
-      showToast('无法解析 EXIF: ' + file.name);
-      return;
-    }
-
-    // Second pass: get raw MakerNote binary for Fujifilm parsing
-    let fujiTags = {};
-    try {
-      const raw = await exifr.parse(file, {
-        tiff: true, makerNote: true,
-        mergeOutput: false, translateKeys: false, translateValues: false,
-        sanitize: false,
-      });
-      const makerNote = getMakerNote(raw) || getMakerNote(exif);
-      if (makerNote) {
-        const parsed = parseFujiMakerNote(makerNote);
-        if (parsed) {
-          fujiTags = decodeFujiMakerNote(parsed);
-          console.log('Fujifilm MakerNote decoded:', fujiTags);
-        }
-      }
-    } catch (e) {
-      console.warn('MakerNote parse failed:', e);
-    }
+    // Independent TIFF/JPEG inspection can recover a MakerNote omitted by exifr.
+    const { fujiTags, metadataDiagnostic } = await readFujiMetadata(file, exif);
 
     let thumbUrl = null;
     try {
@@ -1145,7 +1177,7 @@ async function processFile(file) {
       }
     }
 
-    const entry = { name: file.name, exif, fujiTags, thumbUrl, file };
+    const entry = { name: file.name, exif, fujiTags, metadataDiagnostic, importSource, thumbUrl, file };
     state.files.push(entry);
     renderTabs();
     setActive(state.files.length - 1);
@@ -1317,20 +1349,52 @@ function renderResult(entry) {
 // Section Builders
 // ============================================================
 
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, ch => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[ch]));
+}
+
+function metadataReport(entry) {
+  return {
+    ...entry.metadataDiagnostic,
+    fileName: entry.name, fileSize: entry.file.size, fileType: entry.file.type || 'unknown',
+    importSource: entry.importSource || 'unknown',
+    standardExifFields: Object.keys(entry.exif).length,
+    fujiFieldCount: Object.keys(entry.fujiTags || {}).length,
+    userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : 'unknown',
+  };
+}
+
 function buildMetadataDiagnostic(entry) {
   const { exif, fujiTags = {}, file } = entry;
   const count = Object.keys(fujiTags).length;
-  const makerNote = getMakerNote(exif);
+  const d = entry.metadataDiagnostic || {};
+  const libraryBytes = d.libraryMakerNoteBytes ?? getMakerNote(exif)?.byteLength ?? 0;
+  const directLabels = {found: '发现 0x927C 标签', absent: '未发现 0x927C 标签', malformed: '结构异常，无法确认是否缺失', unsupported: '此格式暂不支持直接检查', error: '读取失败，无法确认是否缺失'};
+  const scope = d.scope === 'RAF embedded JPEG' ? 'RAF 内嵌预览' : '网页收到的文件';
+  const details = `诊断 v2 · 文件大小：${file.size.toLocaleString('zh-CN')} 字节 · 类型：${file.type || '未知'} · exifr MakerNote：${libraryBytes} 字节 · 原始字节检查：${directLabels[d.directStatus] || '未执行'}${d.directMakerNoteBytes ? '（' + d.directMakerNoteBytes + ' 字节）' : ''} · 富士字段：${count} 项`;
   const isFuji = /fuji/i.test(String(exif.Make || '') + ' ' + String(exif.Model || ''));
-  const details = `文件大小：${file.size.toLocaleString('zh-CN')} 字节 · MakerNote：${makerNote ? '已读取（' + makerNote.byteLength + ' 字节）' : count ? '已解码' : '解析器未返回'} · 富士字段：${count} 项`;
-  if (!count && (isFuji || makerNote)) {
-    return `<div class="metadata-notice" role="status">
-      <strong>${makerNote ? '已读取 MakerNote，但未解码出富士参数' : '当前未读取到富士专用参数'}</strong>
-      ${makerNote ? '需要检查 MakerNote 格式与解析兼容性；这不代表原图缺少参数。' : '这不能直接判断原图数据已被移除，也可能是当前格式或浏览器的读取兼容性问题。请将同一张原图从“文件”入口导入作对照。'}
-      <br>${details}<br>若仍有问题，请提供原始照片、iOS 版本及上述诊断信息，便于对比定位。
-    </div>`;
+  if (!count && (isFuji || libraryBytes || d.directMakerNoteBytes || !Object.keys(exif).length)) {
+    let title = '当前未读取到富士专用参数';
+    let explanation = '这不能直接判断原图数据已被移除，也可能是当前格式或浏览器的读取兼容性问题。';
+    if (d.decodeStatus === 'invalid') {
+      title = '已找到 FUJIFILM MakerNote，但数据结构未能解码';
+      explanation = '原始字节仍有富士标识，需要进一步排查偏移、数据完整性或机型格式。';
+    } else if (d.decodeStatus === 'non-fuji') {
+      title = '已读取 MakerNote，但不是 FUJIFILM 格式';
+      explanation = '该 MakerNote 不带 FUJIFILM 头，无法按富士格式解码。';
+    } else if (libraryBytes) {
+      title = '已读取 MakerNote，但未解码出富士参数';
+      explanation = '需要检查 MakerNote 格式与解析兼容性；这不代表原图缺少参数。';
+    } else if (d.directStatus === 'absent') {
+      title = scope + '的 EXIF 中未发现 MakerNote 标签';
+      explanation = '已绕过 exifr 直接检查 0x927C；检查范围内没有该标签。这里只能说明网页收到的这份数据，不代表相册原图缺失参数；请用同一原图从“文件”入口对照。';
+    } else if (d.directStatus) {
+      explanation = '直接检查未能确认 MakerNote 是否存在：' + directLabels[d.directStatus] + '。不能判定数据已被移除。';
+    }
+    return `<div class="metadata-notice" role="status"><strong>${escapeHtml(title)}</strong>${escapeHtml(explanation)}<br>${escapeHtml(details)}<br>请导出 JSON，其中的 _metadataDiagnostic 已包含本次字节检查结果（不包含照片像素或完整二进制）。</div>`;
   }
-  return `<p style="font-size:.7rem;color:var(--fg2);margin-bottom:1rem">${details}</p>`;
+  const recovered = d.decodeSource === 'direct' && !libraryBytes ? ' · 已通过原始字节回退恢复富士参数' : '';
+  return `<p style="font-size:.7rem;color:var(--fg2);margin-bottom:1rem">${escapeHtml(details + recovered)}</p>`;
 }
 
 function buildFilmSimSection(filmSim, ft) {
@@ -1433,12 +1497,10 @@ function copyAll() {
   navigator.clipboard.writeText(text).then(() => showToast('已复制到剪贴板'));
 }
 
-function exportJSON() {
-  if (state.activeIndex < 0) return;
-  const entry = state.files[state.activeIndex];
+function buildExportData(entry) {
   const clean = {};
   for (const [k, v] of Object.entries(entry.exif)) {
-    if (v instanceof Uint8Array || v instanceof ArrayBuffer) continue;
+    if (ArrayBuffer.isView(v) || v instanceof ArrayBuffer) continue;
     if (v instanceof Date) { clean[k] = v.toISOString(); continue; }
     clean[k] = v;
   }
@@ -1449,7 +1511,15 @@ function exportJSON() {
     const filmSim = resolveFilmSim(entry.fujiTags);
     if (filmSim) clean._filmSimulation = filmSim[0] + ' (' + filmSim[1] + ')';
   }
-  const blob = new Blob([JSON.stringify(clean, null, 2)], { type: 'application/json' });
+  // Preserve binary inspection facts even though raw binary fields are omitted.
+  clean._metadataDiagnostic = metadataReport(entry);
+  return clean;
+}
+
+function exportJSON() {
+  if (state.activeIndex < 0) return;
+  const entry = state.files[state.activeIndex];
+  const blob = new Blob([JSON.stringify(buildExportData(entry), null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
