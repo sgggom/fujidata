@@ -92,6 +92,12 @@ body::before{
   background:var(--bg);color:var(--fg3);border:1px solid var(--border);
 }
 .dropzone input[type=file]{display:none}
+.import-actions{display:flex;justify-content:center;gap:.6rem;flex-wrap:wrap;margin-top:1rem}
+.import-actions button{padding:.65rem 1rem;border:1px solid var(--border2);border-radius:var(--radius);background:var(--bg3);color:var(--fg);font:inherit;font-size:.8rem;cursor:pointer}
+.import-actions button.primary{background:var(--red);border-color:var(--red);color:#fff}
+.dropzone .import-help{max-width:640px;margin:.9rem auto 0;color:var(--fg2);font-size:.75rem}
+.metadata-notice{padding:.8rem 1rem;margin-bottom:1rem;border:1px solid #82632c;border-radius:var(--radius);background:rgba(184,135,42,.1);color:var(--fg);font-size:.8rem;line-height:1.8}
+.metadata-notice strong{display:block;color:#e3b968}
 
 /* --- Toolbar --- */
 .toolbar{
@@ -439,11 +445,18 @@ body::before{
       <circle cx="37" cy="18" r="2" fill="currentColor"/>
     </svg>
     <h2>拖放照片至此处</h2>
-    <p>或点击选择文件 — 支持多文件同时解析</p>
+    <p>或选择相机原始文件 — 支持多文件同时解析</p>
+    <div class="import-actions">
+      <button type="button" class="primary" id="chooseOriginal">从文件选择原图（推荐）</button>
+      <button type="button" id="choosePhoto">从照片图库选择</button>
+    </div>
+    <p class="import-help">iPhone 用户：请优先将相机原始 JPG / RAF 保存到“文件”后选择。照片图库或传输软件可能转换图片、移除富士专用参数；请勿使用截图或压缩后的照片。</p>
     <div class="formats">
       <span>.RAF</span><span>.JPG</span><span>.JPEG</span><span>.TIFF</span><span>.DNG</span>
     </div>
-    <input type="file" id="fileInput" multiple accept=".raf,.jpg,.jpeg,.tiff,.tif,.dng,.png,.heic,.heif,.arw,.cr2,.cr3,.nef,.orf,.rw2">
+    <!-- No image-only filter: prefer the document picker for unchanged originals on iOS. -->
+    <input type="file" id="fileInput" multiple>
+    <input type="file" id="photoInput" multiple accept="image/*">
   </div>
 
   <!-- TOOLBAR (hidden until files loaded) -->
@@ -622,8 +635,9 @@ async function processRafFile(file) {
       mergeOutput: false, translateKeys: false, translateValues: false,
       sanitize: false,
     });
-    if (raw && raw.makerNote) {
-      const parsed = parseFujiMakerNote(raw.makerNote);
+    const makerNote = getMakerNote(raw) || getMakerNote(exif);
+    if (makerNote) {
+      const parsed = parseFujiMakerNote(makerNote);
       if (parsed) {
         fujiTags = decodeFujiMakerNote(parsed);
         console.log('RAF: Fujifilm MakerNote decoded:', fujiTags);
@@ -647,9 +661,25 @@ async function processRafFile(file) {
 }
 
 
+// Support exifr's top-level makerNote plus the raw/translated EXIF tag
+// layouts, so decoding does not depend on one output representation.
+function getMakerNote(result) {
+  if (!result) return null;
+  const blocks = [result, result.exif, result.tiff, result.ifd0];
+  for (const block of blocks) {
+    if (!block) continue;
+    const value = block.MakerNote ?? block.makerNote ?? block[0x927c];
+    if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return value;
+  }
+  return null;
+}
+
 function parseFujiMakerNote(raw) {
-  if (!raw || !(raw instanceof Uint8Array || raw.buffer)) return null;
-  const buf = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+  if (!raw) return null;
+  const buf = raw instanceof ArrayBuffer ? new Uint8Array(raw)
+    : ArrayBuffer.isView(raw) ? new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength)
+    : null;
+  if (!buf) return null;
   if (buf.length < 16) return null;
 
   // Check 'FUJIFILM' header
@@ -1012,15 +1042,28 @@ function pick(exif, ...keys) {
 
 const dropzone = document.getElementById('dropzone');
 const fileInput = document.getElementById('fileInput');
+const photoInput = document.getElementById('photoInput');
 
-dropzone.addEventListener('click', () => fileInput.click());
+// Ignore bubbled input clicks (including programmatic clicks) to avoid recursion.
+dropzone.addEventListener('click', e => {
+  if (e.target.closest('button, input')) return;
+  fileInput.click();
+});
+document.getElementById('chooseOriginal').addEventListener('click', () => fileInput.click());
+document.getElementById('choosePhoto').addEventListener('click', () => photoInput.click());
 dropzone.addEventListener('dragover', e => { e.preventDefault(); dropzone.classList.add('dragover'); });
 dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
 dropzone.addEventListener('drop', e => {
   e.preventDefault(); dropzone.classList.remove('dragover');
   handleFiles(e.dataTransfer.files);
 });
-fileInput.addEventListener('change', e => handleFiles(e.target.files));
+for (const input of [fileInput, photoInput]) {
+  input.addEventListener('change', e => {
+    const files = Array.from(e.target.files || []);
+    e.target.value = ''; // Allow choosing the same original again for comparison.
+    handleFiles(files);
+  });
+}
 
 async function handleFiles(fileList) {
   if (!fileList || !fileList.length) return;
@@ -1078,9 +1121,9 @@ async function processFile(file) {
         mergeOutput: false, translateKeys: false, translateValues: false,
         sanitize: false,
       });
-      if (raw && raw.makerNote) {
-        const mnBuf = raw.makerNote;
-        const parsed = parseFujiMakerNote(mnBuf);
+      const makerNote = getMakerNote(raw) || getMakerNote(exif);
+      if (makerNote) {
+        const parsed = parseFujiMakerNote(makerNote);
         if (parsed) {
           fujiTags = decodeFujiMakerNote(parsed);
           console.log('Fujifilm MakerNote decoded:', fujiTags);
@@ -1190,7 +1233,7 @@ function renderResult(entry) {
 
   // --- Data Area ---
   const dataArea = document.getElementById('dataArea');
-  dataArea.innerHTML = '';
+  dataArea.innerHTML = buildMetadataDiagnostic(entry);
 
   // 1. Film Simulation (from MakerNote)
   const filmSim = resolveFilmSim(ft);
@@ -1273,6 +1316,22 @@ function renderResult(entry) {
 // ============================================================
 // Section Builders
 // ============================================================
+
+function buildMetadataDiagnostic(entry) {
+  const { exif, fujiTags = {}, file } = entry;
+  const count = Object.keys(fujiTags).length;
+  const makerNote = getMakerNote(exif);
+  const isFuji = /fuji/i.test(String(exif.Make || '') + ' ' + String(exif.Model || ''));
+  const details = `文件大小：${file.size.toLocaleString('zh-CN')} 字节 · MakerNote：${makerNote ? '已读取（' + makerNote.byteLength + ' 字节）' : count ? '已解码' : '解析器未返回'} · 富士字段：${count} 项`;
+  if (!count && (isFuji || makerNote)) {
+    return `<div class="metadata-notice" role="status">
+      <strong>${makerNote ? '已读取 MakerNote，但未解码出富士参数' : '当前未读取到富士专用参数'}</strong>
+      ${makerNote ? '需要检查 MakerNote 格式与解析兼容性；这不代表原图缺少参数。' : '这不能直接判断原图数据已被移除，也可能是当前格式或浏览器的读取兼容性问题。请将同一张原图从“文件”入口导入作对照。'}
+      <br>${details}<br>若仍有问题，请提供原始照片、iOS 版本及上述诊断信息，便于对比定位。
+    </div>`;
+  }
+  return `<p style="font-size:.7rem;color:var(--fg2);margin-bottom:1rem">${details}</p>`;
+}
 
 function buildFilmSimSection(filmSim, ft) {
   if (!filmSim) {
